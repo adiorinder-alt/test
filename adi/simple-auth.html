@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Auth</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 400px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <h1>Login</h1>
+    
+    <!-- Replace YOUR_PROJECT_ID with your actual Descope project ID -->
+    <descope-wc 
+        project-id="P31M5kW4iiyEZQEnVzT8wSOjviwy" 
+        flow-id="sign-up-or-in"
+        redirect-url="">
+    </descope-wc>
+    
+    <div id="user-info" style="display: none; margin-top: 20px; padding: 15px; background: #f0f8ff; border-radius: 5px;">
+        <h3>Welcome!</h3>
+        <p><strong>Email:</strong> <span id="user-email"></span></p>
+        <p><strong>Name:</strong> <span id="user-name"></span></p>
+        <button onclick="logout()" style="background: #dc3545; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;">Logout</button>
+    </div>
+
+    <!-- Descope SDK -->
+    <script src="https://unpkg.com/@descope/web-component@latest/dist/index.js"></script>
+    
+    <script>
+        // Listen for authentication success
+        document.querySelector('descope-wc').addEventListener('success', (event) => {
+            console.log('User logged in:', event.detail.user);
+            
+            // Store user info and token
+            localStorage.setItem('auth-token', event.detail.sessionJwt);
+            localStorage.setItem('user-email', event.detail.user.email);
+            
+            // Try to open Terminal app
+            alert('Login successful! Attempting to open Terminal app...');
+            
+            // Try different methods to open Terminal
+            try {
+                // Method 1: Try terminal protocol
+                window.open('terminal://', '_blank');
+            } catch (e) {
+                console.log('Terminal protocol failed:', e);
+            }
+            
+            // Method 2: Show instructions
+            setTimeout(() => {
+                alert('Please manually open Terminal app or press Cmd+Space and type "Terminal"');
+                // Close the browser window
+                window.close();
+            }, 2000);
+        });
+        
+        // Listen for errors
+        document.querySelector('descope-wc').addEventListener('error', (event) => {
+            alert('Login failed: ' + event.detail.errorMessage);
+        });
+    </script>
+</body>
+</html>

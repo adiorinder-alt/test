@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login</title>
+</head>
+<body>
+<descope-wc
+	project-id="P31M5kW4iiyEZQEnVzT8wSOjviwy"
+	flow-id="sign-up-or-in"
+	theme="light"
+/>
+
+<script>
+	const wcElement = document.getElementsByTagName('descope-wc')[0];
+
+	const onSuccess = (e) => {
+			console.log(e.detail.user.name)
+			console.log(e.detail.user.email)
+	};
+	const onError = (err) => console.log(err);
+
+	wcElement.addEventListener('success', onSuccess);
+	wcElement.addEventListener('error', onError);
+</script>
+
+</body>
+</html>
