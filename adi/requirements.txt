@@ -1,0 +1,2 @@
+PyGithub>=2.7.0
+descope>=1.7.8
