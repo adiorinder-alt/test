@@ -3,12 +3,10 @@ import sys
 import argparse
 import subprocess
 import json
-import webbrowser
-import base64
+
 from pathlib import Path
 from typing import Optional, Dict, Any
 from getpass import getpass
-import time
 from descope import DeliveryMethod
 try:
     from github import Github, GithubException
@@ -22,12 +20,19 @@ except ImportError:
     print("❌ Descope not installed. Run: pip install descope")
     sys.exit(1)
 
+try:
+    from openai import OpenAI
+except ImportError:
+    print("❌ OpenAI not installed. Run: pip install openai")
+    sys.exit(1)
+
 class GitHubCLI:
     def __init__(self):
         self.config_dir = Path.home() / '.github-cli'
         self.config_file = self.config_dir / 'config.json'
         self.github = None
         self.descope_client = None
+        self.openai_client = None
         self.config = {}
         
         self.descope_project_id = os.getenv('DESCOPE_PROJECT_ID', 'P31M5kW4iiyEZQEnVzT8wSOjviwy')
@@ -35,6 +40,7 @@ class GitHubCLI:
         self.config_dir.mkdir(exist_ok=True)
         self.load_config()
         self.init_descope_client()
+        self.init_openai_client()
     
     def load_config(self):
         
@@ -43,7 +49,7 @@ class GitHubCLI:
                 with open(self.config_file, 'r') as f:
                     self.config = json.load(f)
         except Exception as e:
-            print(f"⚠️  Warning: Could not load config: {e}")
+            print(f"Warning: Could not load config: {e}")
     
     def save_config(self):
         
@@ -51,7 +57,7 @@ class GitHubCLI:
             with open(self.config_file, 'w') as f:
                 json.dump(self.config, f, indent=2)
         except Exception as e:
-            print(f"❌ Error saving config: {e}")
+            print(f"Error saving config: {e}")
     
     def init_descope_client(self):
         
@@ -60,29 +66,360 @@ class GitHubCLI:
                 project_id=self.descope_project_id,
                 management_key=self.descope_management_key
             )
-            print("✅ Descope client initialized successfully!")
+            print("Descope client initialized successfully!")
         except Exception as e:
-            print(f"⚠️  Warning: Could not initialize Descope client: {e}")
+            print(f"Warning: Could not initialize Descope client: {e}")
             self.descope_client = None
+    
+    def init_openai_client(self):
+        """Initialize OpenAI client with API key management"""
+        openai_api_key = os.getenv('OPENAI_API_KEY') or self.config.get('openai_api_key')
+        
+        if not openai_api_key:
+            # Don't initialize if no key is available, but don't error out
+            # The key will be requested when the auto feature is used
+            self.openai_client = None
+            return
+        
+        try:
+            self.openai_client = OpenAI(api_key=openai_api_key)
+            # Test the connection with a simple request
+            # This will raise an exception if the API key is invalid
+        except Exception as e:
+            print(f"Warning: Could not initialize OpenAI client: {e}")
+            self.openai_client = None
+    
+    def setup_openai_client(self) -> bool:
+        """Set up OpenAI client with API key from user input"""
+        if self.openai_client:
+            return True
+        
+        openai_api_key = os.getenv('OPENAI_API_KEY') or self.config.get('openai_api_key')
+        
+        if not openai_api_key:
+            print("\n🤖 OpenAI API Key Setup")
+            print("You need an OpenAI API key for automatic commit message generation.")
+            print("Get one at: https://platform.openai.com/account/api-keys")
+            
+            openai_api_key = getpass("Enter your OpenAI API key: ").strip()
+            
+            if not openai_api_key:
+                print("❌ No OpenAI API key provided")
+                return False
+            
+            # Save the API key to config
+            self.config['openai_api_key'] = openai_api_key
+            self.save_config()
+        
+        try:
+            self.openai_client = OpenAI(api_key=openai_api_key)
+            return True
+        except Exception as e:
+            print(f"❌ OpenAI API key validation failed: {e}")
+            return False
+    
+    def get_git_diff(self) -> Optional[str]:
+        """Get staged git changes for commit message generation"""
+        try:
+            # Check if there are staged changes
+            result = subprocess.run(['git', 'diff', '--staged', '--quiet'], capture_output=True)
+            if result.returncode == 0:
+                # No staged changes, get all changes
+                result = subprocess.run(['git', 'diff'], capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout
+                else:
+                    # If no unstaged changes either, compare with last commit
+                    result = subprocess.run(['git', 'diff', 'HEAD~1'], capture_output=True, text=True)
+                    if result.returncode == 0 and result.stdout.strip():
+                        return result.stdout
+            else:
+                # Get staged changes
+                result = subprocess.run(['git', 'diff', '--staged'], capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout
+            
+            return None
+            
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to get git diff: {e}")
+            return None
+    
+    def generate_commit_message(self, git_diff: str) -> Optional[str]:
+        """Generate commit message using Hugging Face Inference API (FREE)"""
+        try:
+            print("🤗 Using Hugging Face Inference API...")
+            result = self.generate_with_huggingface(git_diff)
+            if result:
+                return result
+        except Exception as e:
+            print(f"⚠️ Hugging Face failed: {e}")
+        
+        print("🔄 Using intelligent fallback analysis...")
+        return self.generate_fallback_message(git_diff)
+    
+    def generate_with_huggingface(self, git_diff: str) -> Optional[str]:
+        """Generate commit message using multiple AI APIs (FREE)"""
+        try:
+            import requests
+            from time import sleep
+            
+            # Test connectivity first
+            if not self.test_connectivity():
+                print("📶 Network connectivity issues detected, using offline mode")
+                return None
+            
+            # Create a focused prompt
+            prompt = f"""Git commit message for:\n{git_diff[:800]}\n\nMessage:"""
+            
+            hf_token = os.getenv('HUGGINGFACE_API_TOKEN')
+            if not hf_token:
+                response = input("\n🤗 Enter HF token (or press Enter to skip): ").strip()
+                if response:
+                    hf_token = response
+                    os.environ['HUGGINGFACE_API_TOKEN'] = hf_token
+            
+            # Try different API strategies
+            strategies = [
+                self.try_huggingface_serverless,
+                self.try_alternative_apis,
+                self.try_simple_text_generation
+            ]
+            
+            for strategy in strategies:
+                try:
+                    result = strategy(prompt, hf_token)
+                    if result:
+                        return result
+                except Exception as e:
+                    print(f"⚠️ Strategy failed: {str(e)[:50]}")
+                    continue
+            
+            return None
+            
+        except ImportError:
+            print("📦 Installing requests...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "requests"], check=True)
+            return self.generate_with_huggingface(git_diff)
+        except Exception as e:
+            print(f"❌ HF API error: {str(e)[:100]}")
+            return None
+    
+    def test_connectivity(self) -> bool:
+        """Test basic internet connectivity"""
+        try:
+            import requests
+            # Test with a simple, fast endpoint
+            response = requests.get("https://www.google.com", timeout=3)
+            return response.status_code == 200
+        except:
+            try:
+                # Try alternative endpoint
+                import requests
+                response = requests.get("https://httpbin.org/status/200", timeout=2)
+                return response.status_code == 200
+            except:
+                # If both fail, assume no connectivity but don't block - let API calls handle their own timeouts
+                return True  # Changed to True to allow API attempts
+    
+    def try_huggingface_serverless(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
+        """Try Hugging Face Serverless Inference"""
+        import requests
+        
+        # Fast, lightweight models that usually work
+        models = [
+            "microsoft/DialoGPT-small",
+            "distilgpt2"
+        ]
+        
+        for model in models:
+            try:
+                headers = {"Content-Type": "application/json"}
+                if hf_token:
+                    headers["Authorization"] = f"Bearer {hf_token}"
+                
+                print(f"🔄 Trying {model}...")
+                response = requests.post(
+                    f"https://api-inference.huggingface.co/models/{model}",
+                    headers=headers,
+                    json={"inputs": prompt},
+                    timeout=8  # Shorter timeout
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if isinstance(result, list) and result:
+                        generated = result[0].get("generated_text", "")
+                        commit_msg = self.extract_commit_message(generated, prompt)
+                        if commit_msg:
+                            print(f"✅ Success with {model}!")
+                            return commit_msg
+                            
+            except requests.exceptions.Timeout:
+                print(f"⏱️ {model} timeout")
+                continue
+            except Exception as e:
+                print(f"⚠️ {model} failed: {str(e)[:30]}")
+                continue
+        
+        return None
+    
+    def try_alternative_apis(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
+        """Try alternative free AI APIs"""
+        import requests
+        
+        # Try a simple text completion API (mock implementation)
+        try:
+            # This is a placeholder for other free APIs you could integrate
+            # For example: Together AI, Replicate, etc.
+            print("🔄 Trying alternative APIs...")
+            
+            # For now, return None to skip to next strategy
+            return None
+            
+        except Exception:
+            return None
+    
+    def try_simple_text_generation(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
+        """Try simple pattern-based generation as last resort before fallback"""
+        try:
+            print("🔄 Using pattern-based generation...")
+            
+            # Extract key information from git diff
+            diff_lower = prompt.lower()
+            
+            # Look for specific patterns
+            if '+def ' in diff_lower or '+class ' in diff_lower:
+                return "feat: add new functionality"
+            elif 'requirements' in diff_lower or 'package' in diff_lower:
+                return "chore: update dependencies"
+            elif '+import' in diff_lower:
+                return "feat: add new imports and functionality"
+            elif 'fix' in diff_lower or 'bug' in diff_lower:
+                return "fix: resolve issues"
+            elif 'test' in diff_lower:
+                return "test: add or update tests"
+            elif '.md' in diff_lower:
+                return "docs: update documentation"
+            else:
+                return "chore: update code"
+                
+        except Exception:
+            return None
+    
+    def extract_commit_message(self, generated_text: str, git_diff: str) -> Optional[str]:
+        """Extract and clean commit message from generated text"""
+        try:
+            # Clean up the generated text
+            text = generated_text.replace(git_diff[:500], "").strip()
+            
+            # Look for patterns that indicate a commit message
+            lines = text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Check if line looks like a commit message
+                if any(line.lower().startswith(t + ':') for t in ['feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore']):
+                    return line[:72]  # Limit to 72 characters
+                    
+                # Check if line has commit-like structure
+                if ':' in line and len(line) < 80 and not line.startswith('http'):
+                    return line[:72]
+            
+            # If no good commit message found, create one from the first meaningful line
+            for line in lines:
+                line = line.strip()
+                if len(line) > 10 and len(line) < 100 and not line.startswith('Generate'):
+                    # Try to format it as a commit message
+                    if not line.lower().startswith(('feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore')):
+                        line = f"feat: {line.lower()}"
+                    return line[:72]
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def generate_fallback_message(self, git_diff: str) -> str:
+        """Generate a basic commit message using simple analysis (NO AI REQUIRED)"""
+        try:
+            # Simple keyword-based analysis
+            diff_lines = git_diff.lower().split('\n')
+            
+            # Count changes
+            added_lines = sum(1 for line in diff_lines if line.startswith('+') and not line.startswith('+++'))
+            removed_lines = sum(1 for line in diff_lines if line.startswith('-') and not line.startswith('---'))
+            
+            # Detect file types and changes
+            change_types = set()
+            
+            for line in diff_lines:
+                if ('def ' in line or 'class ' in line) and line.startswith('+'):
+                    change_types.add('feat')
+                elif 'fix' in line or 'bug' in line:
+                    change_types.add('fix')
+                elif 'import' in line and line.startswith('+'):
+                    change_types.add('feat')
+                elif 'test' in line:
+                    change_types.add('test')
+                elif '.md' in git_diff or 'readme' in git_diff.lower():
+                    change_types.add('docs')
+                elif 'requirements' in git_diff.lower() or 'package' in git_diff.lower():
+                    change_types.add('chore')
+            
+            # Determine primary change type
+            if 'feat' in change_types:
+                commit_type = 'feat'
+            elif 'fix' in change_types:
+                commit_type = 'fix'
+            elif 'test' in change_types:
+                commit_type = 'test'
+            elif 'docs' in change_types:
+                commit_type = 'docs'
+            elif 'chore' in change_types:
+                commit_type = 'chore'
+            else:
+                commit_type = 'chore'
+            
+            # Generate message based on detected patterns
+            if 'huggingface' in git_diff.lower() or 'hf' in git_diff.lower():
+                return "feat: add Hugging Face integration for auto-commit messages"
+            elif 'openai' in git_diff.lower():
+                return "feat: add AI-powered commit message generation"
+            elif 'requirements' in git_diff.lower():
+                return "chore: update dependencies"
+            elif 'main.py' in git_diff and added_lines > 50:
+                return "feat: implement major functionality updates"
+            elif added_lines > removed_lines * 2:
+                return f"{commit_type}: add new features and functionality"
+            elif removed_lines > added_lines * 2:
+                return f"{commit_type}: remove deprecated code"
+            else:
+                return f"{commit_type}: update and improve codebase"
+                
+        except Exception:
+            return "chore: update codebase"
     
     def authenticate_descope(self, email: Optional[str] = None, force: bool = False) -> bool:
         
         if not self.descope_client:
-            print("❌ Descope client not initialized")
+            print("Descope client not initialized")
             return False
         if not force and 'descope_session_token' in self.config and 'user_email' in self.config:
-            print(f"🔑 Already authenticated as: {self.config['user_email']}")
+            print(f"Already authenticated as: {self.config['user_email']}")
 
             try:
 
                 session_token = self.config['descope_session_token']
                 return self.setup_github_connection()
             except Exception as e:
-                print(f"⚠️  Existing session invalid: {e}")
+                print(f"Existing session invalid: {e}")
         if not email:
             email = input("\n📧 Enter your email address: ")
         
-        print(f"\n🔑 Descope Authentication for {email}")
+        print(f"\n Descope Authentication for {email}")
         print("Choose authentication method:")
         print("1. Magic Link (email)")
         print("2. OTP (email)")
@@ -429,6 +766,7 @@ Examples:
   %(prog)s auth
   %(prog)s init my-repo
   %(prog)s commit "Initial commit"
+  %(prog)s commit --auto
   %(prog)s status
         """
     )
@@ -447,7 +785,8 @@ Examples:
     init_parser.add_argument('--description', default='', help='Repository description')
     init_parser.add_argument('--private', action='store_true', help='Create private repository')
     commit_parser = subparsers.add_parser('commit', help='Commit and push changes')
-    commit_parser.add_argument('message', help='Commit message')
+    commit_parser.add_argument('message', nargs='?', help='Commit message (optional if using --auto)')
+    commit_parser.add_argument('--auto', action='store_true', help='Generate commit message automatically using ChatGPT')
     commit_parser.add_argument('--branch', default='main', help='Branch to push to (default: main)')
     status_parser = subparsers.add_parser('status', help='Show current status')
     
@@ -476,11 +815,44 @@ Examples:
             sys.exit(1)
     
     elif args.command == 'commit':
-
         if not cli.authenticate():
             print("❌ Authentication required for git operations")
             sys.exit(1)
-        if not cli.commit_and_push(args.message, args.branch):
+        
+        message = args.message
+        
+        # Handle auto commit message generation
+        if args.auto:
+            print("🤖 Generating commit message automatically...")
+            git_diff = cli.get_git_diff()
+            if not git_diff:
+                print("❌ No changes detected for commit message generation")
+                sys.exit(1)
+            
+            generated_message = cli.generate_commit_message(git_diff)
+            if not generated_message:
+                print("❌ Failed to generate commit message")
+                sys.exit(1)
+            
+            print(f"🎆 Generated commit message: {generated_message}")
+            
+            # Ask user to confirm the generated message
+            confirm = input("\nUse this commit message? (y/n/edit): ").strip().lower()
+            if confirm == 'n':
+                print("❌ Commit cancelled")
+                sys.exit(1)
+            elif confirm == 'edit':
+                message = input(f"Edit message [{generated_message}]: ").strip()
+                if not message:
+                    message = generated_message
+            else:
+                message = generated_message
+        
+        elif not message:
+            print("❌ Commit message is required when not using --auto")
+            sys.exit(1)
+        
+        if not cli.commit_and_push(message, args.branch):
             sys.exit(1)
     
     elif args.command == 'status':

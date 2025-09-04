@@ -1,2 +1,4 @@
 PyGithub>=2.7.0
 descope>=1.7.8
+openai>=1.0.0
+requests>=2.25.0
