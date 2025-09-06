@@ -878,7 +878,13 @@ Commit message:"""
                 return True
             subprocess.run(['git', 'commit', '-m', message], check=True)
             print(f"✅ Committed changes: {message}")
-            subprocess.run(['git', 'push', 'origin', branch], check=True)
+            current_branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True, check=True)
+            current_branch = current_branch_result.stdout.strip()
+            current_branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True, check=True)
+            current_branch = current_branch_result.stdout.strip()
+            subprocess.run(['git', 'push', 'origin', current_branch], check=True)
+            branch = current_branch
+            branch = current_branch
             print(f"🚀 Pushed to {branch} branch")
             
             return True
