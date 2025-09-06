@@ -21,18 +21,14 @@ except ImportError:
     print("❌ Descope not installed. Run: pip install descope")
     sys.exit(1)
 
-try:
-    from openai import OpenAI
-except ImportError:
-    print("❌ OpenAI not installed. Run: pip install openai")
-    sys.exit(1)
 
 try:
     import requests
 except ImportError:
-    print("📦 Installing requests...")
+    print("📦 Installing requests for Ollama support...")
     subprocess.run([sys.executable, "-m", "pip", "install", "requests"], check=True)
     import requests
+
 
 class GitHubCLI:
     def __init__(self):
@@ -40,7 +36,6 @@ class GitHubCLI:
         self.config_file = self.config_dir / 'config.json'
         self.github = None
         self.descope_client = None
-        self.openai_client = None
         self.config = {}
         self.ollama_url = "http://localhost:11434"
         
@@ -49,7 +44,6 @@ class GitHubCLI:
         self.config_dir.mkdir(exist_ok=True)
         self.load_config()
         self.init_descope_client()
-        self.init_openai_client()
     
     def load_config(self):
         
@@ -80,52 +74,6 @@ class GitHubCLI:
             print(f"Warning: Could not initialize Descope client: {e}")
             self.descope_client = None
     
-    def init_openai_client(self):
-        """Initialize OpenAI client with API key management"""
-        openai_api_key = os.getenv('OPENAI_API_KEY') or self.config.get('openai_api_key')
-        
-        if not openai_api_key:
-            # Don't initialize if no key is available, but don't error out
-            # The key will be requested when the auto feature is used
-            self.openai_client = None
-            return
-        
-        try:
-            self.openai_client = OpenAI(api_key=openai_api_key)
-            # Test the connection with a simple request
-            # This will raise an exception if the API key is invalid
-        except Exception as e:
-            print(f"Warning: Could not initialize OpenAI client: {e}")
-            self.openai_client = None
-    
-    def setup_openai_client(self) -> bool:
-        """Set up OpenAI client with API key from user input"""
-        if self.openai_client:
-            return True
-        
-        openai_api_key = os.getenv('OPENAI_API_KEY') or self.config.get('openai_api_key')
-        
-        if not openai_api_key:
-            print("\n🤖 OpenAI API Key Setup")
-            print("You need an OpenAI API key for automatic commit message generation.")
-            print("Get one at: https://platform.openai.com/account/api-keys")
-            
-            openai_api_key = getpass("Enter your OpenAI API key: ").strip()
-            
-            if not openai_api_key:
-                print("❌ No OpenAI API key provided")
-                return False
-            
-            # Save the API key to config
-            self.config['openai_api_key'] = openai_api_key
-            self.save_config()
-        
-        try:
-            self.openai_client = OpenAI(api_key=openai_api_key)
-            return True
-        except Exception as e:
-            print(f"❌ OpenAI API key validation failed: {e}")
-            return False
     
     def get_git_diff(self) -> Optional[str]:
         """Get staged git changes for commit message generation"""
@@ -155,166 +103,19 @@ class GitHubCLI:
             return None
     
     def generate_commit_message(self, git_diff: str) -> Optional[str]:
-        """Generate commit message using Hugging Face Inference API (FREE)"""
+        """Generate commit message using local LLM (Ollama) with intelligent fallback"""
+        # Try local Ollama LLM first
         try:
-            print("🤗 Using Hugging Face Inference API...")
-            result = self.generate_with_huggingface(git_diff)
+            print("🔄 Trying local LLM (Ollama)...")
+            result = self.generate_with_ollama(git_diff)
             if result:
                 return result
         except Exception as e:
-            print(f"⚠️ Hugging Face failed: {e}")
+            print(f"⚠️ Local LLM failed: {str(e)[:50]}")
         
         print("🔄 Using intelligent fallback analysis...")
         return self.generate_fallback_message(git_diff)
     
-    def generate_with_huggingface(self, git_diff: str) -> Optional[str]:
-        """Generate commit message using multiple AI APIs (FREE)"""
-        try:
-            import requests
-            from time import sleep
-            
-            # Test connectivity first
-            if not self.test_connectivity():
-                print("📶 Network connectivity issues detected, using offline mode")
-                return None
-            
-            # Create a focused prompt
-            prompt = f"""Git commit message for:\n{git_diff[:800]}\n\nMessage:"""
-            
-            hf_token = os.getenv('HUGGINGFACE_API_TOKEN')
-            if not hf_token:
-                response = input("\n🤗 Enter HF token (or press Enter to skip): ").strip()
-                if response:
-                    hf_token = response
-                    os.environ['HUGGINGFACE_API_TOKEN'] = hf_token
-            
-            # Try different API strategies
-            strategies = [
-                self.try_huggingface_serverless,
-                self.try_alternative_apis,
-                self.try_simple_text_generation
-            ]
-            
-            for strategy in strategies:
-                try:
-                    result = strategy(prompt, hf_token)
-                    if result:
-                        return result
-                except Exception as e:
-                    print(f"⚠️ Strategy failed: {str(e)[:50]}")
-                    continue
-            
-            return None
-            
-        except ImportError:
-            print("📦 Installing requests...")
-            subprocess.run([sys.executable, "-m", "pip", "install", "requests"], check=True)
-            return self.generate_with_huggingface(git_diff)
-        except Exception as e:
-            print(f"❌ HF API error: {str(e)[:100]}")
-            return None
-    
-    def test_connectivity(self) -> bool:
-        """Test basic internet connectivity"""
-        try:
-            import requests
-            # Test with a simple, fast endpoint
-            response = requests.get("https://www.google.com", timeout=3)
-            return response.status_code == 200
-        except:
-            try:
-                # Try alternative endpoint
-                import requests
-                response = requests.get("https://httpbin.org/status/200", timeout=2)
-                return response.status_code == 200
-            except:
-                # If both fail, assume no connectivity but don't block - let API calls handle their own timeouts
-                return True  # Changed to True to allow API attempts
-    
-    def try_huggingface_serverless(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
-        """Try Hugging Face Serverless Inference with better error handling"""
-        import requests
-        
-        if not hf_token:
-            print("⚠️ No HF token provided, trying without auth...")
-            return None  # Skip HF if no token
-        
-        # Working models for text generation
-        models = [
-            "microsoft/DialoGPT-small",
-            "gpt2",
-            "distilgpt2"
-        ]
-        
-        for model in models:
-            try:
-                headers = {
-                    "Authorization": f"Bearer {hf_token}",
-                    "Content-Type": "application/json"
-                }
-                
-                # Simplified prompt for better results
-                simple_prompt = f"Commit message:\n{prompt[:500]}\n\nGenerate a git commit message:"
-                
-                print(f"🔄 Trying {model}...")
-                response = requests.post(
-                    f"https://api-inference.huggingface.co/models/{model}",
-                    headers=headers,
-                    json={
-                        "inputs": simple_prompt,
-                        "parameters": {
-                            "max_new_tokens": 50,
-                            "temperature": 0.7,
-                            "do_sample": True,
-                            "return_full_text": False
-                        }
-                    },
-                    timeout=10
-                )
-                
-                print(f"📡 {model} response: {response.status_code}")
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    print(f"📄 Response data: {str(result)[:200]}")
-                    
-                    if isinstance(result, list) and result:
-                        generated = result[0].get("generated_text", "")
-                        if generated:
-                            commit_msg = self.extract_commit_message(generated, simple_prompt)
-                            if commit_msg:
-                                print(f"✅ Success with {model}: {commit_msg}")
-                                return commit_msg
-                    elif isinstance(result, dict) and "generated_text" in result:
-                        generated = result["generated_text"]
-                        commit_msg = self.extract_commit_message(generated, simple_prompt)
-                        if commit_msg:
-                            print(f"✅ Success with {model}: {commit_msg}")
-                            return commit_msg
-                
-                elif response.status_code == 503:
-                    print(f"⏳ {model} is loading, waiting 5 seconds...")
-                    import time
-                    time.sleep(5)
-                    continue
-                elif response.status_code == 401:
-                    print(f"🔐 {model} auth failed - check your HF token")
-                    continue
-                elif response.status_code == 429:
-                    print(f"⏱️ {model} rate limited")
-                    continue
-                else:
-                    print(f"❌ {model} failed: {response.status_code} - {response.text[:100]}")
-                    continue
-                            
-            except requests.exceptions.Timeout:
-                print(f"⏱️ {model} timeout after 10s")
-                continue
-            except Exception as e:
-                print(f"⚠️ {model} error: {str(e)[:50]}")
-                continue
-        
-        return None
     
     def check_ollama_running(self) -> bool:
         """Check if Ollama is running"""
@@ -416,105 +217,6 @@ Commit message:"""
             print(f"❌ Ollama generation failed: {e}")
             return None
     
-    def try_alternative_apis(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
-        """Try local LLM and other alternative APIs"""
-        # Try local Ollama LLM first
-        try:
-            print("🔄 Trying local LLM (Ollama)...")
-            result = self.generate_with_ollama(prompt)
-            if result:
-                return result
-        except Exception as e:
-            print(f"⚠️ Local LLM failed: {str(e)[:50]}")
-        
-        # Try OpenAI if available
-        try:
-            if self.openai_client or self.setup_openai_client():
-                print("🔄 Trying OpenAI API...")
-                
-                response = self.openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a git expert. Generate concise, conventional commit messages following the format 'type: description'. Types include feat, fix, docs, style, refactor, test, chore."},
-                        {"role": "user", "content": f"Generate a git commit message for these changes:\n{prompt[:800]}"}
-                    ],
-                    max_tokens=50,
-                    temperature=0.5
-                )
-                
-                if response.choices and response.choices[0].message:
-                    commit_msg = response.choices[0].message.content.strip()
-                    if commit_msg:
-                        commit_msg = commit_msg.strip('"\'')
-                        commit_msg = commit_msg[:72]
-                        print(f"✅ OpenAI generated: {commit_msg}")
-                        return commit_msg
-        except Exception as e:
-            print(f"⚠️ OpenAI failed: {str(e)[:50]}")
-        
-        return None
-    
-    def try_simple_text_generation(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
-        """Try simple pattern-based generation as last resort before fallback"""
-        try:
-            print("🔄 Using pattern-based generation...")
-            
-            # Extract key information from git diff
-            diff_lower = prompt.lower()
-            
-            # Look for specific patterns
-            if '+def ' in diff_lower or '+class ' in diff_lower:
-                return "feat: add new functionality"
-            elif 'requirements' in diff_lower or 'package' in diff_lower:
-                return "chore: update dependencies"
-            elif '+import' in diff_lower:
-                return "feat: add new imports and functionality"
-            elif 'fix' in diff_lower or 'bug' in diff_lower:
-                return "fix: resolve issues"
-            elif 'test' in diff_lower:
-                return "test: add or update tests"
-            elif '.md' in diff_lower:
-                return "docs: update documentation"
-            else:
-                return "chore: update code"
-                
-        except Exception:
-            return None
-    
-    def extract_commit_message(self, generated_text: str, git_diff: str) -> Optional[str]:
-        """Extract and clean commit message from generated text"""
-        try:
-            # Clean up the generated text
-            text = generated_text.replace(git_diff[:500], "").strip()
-            
-            # Look for patterns that indicate a commit message
-            lines = text.split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                # Check if line looks like a commit message
-                if any(line.lower().startswith(t + ':') for t in ['feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore']):
-                    return line[:72]  # Limit to 72 characters
-                    
-                # Check if line has commit-like structure
-                if ':' in line and len(line) < 80 and not line.startswith('http'):
-                    return line[:72]
-            
-            # If no good commit message found, create one from the first meaningful line
-            for line in lines:
-                line = line.strip()
-                if len(line) > 10 and len(line) < 100 and not line.startswith('Generate'):
-                    # Try to format it as a commit message
-                    if not line.lower().startswith(('feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore')):
-                        line = f"feat: {line.lower()}"
-                    return line[:72]
-            
-            return None
-            
-        except Exception:
-            return None
     
     def generate_fallback_message(self, git_diff: str) -> str:
         """Generate a basic commit message using simple analysis (NO AI REQUIRED)"""
@@ -558,9 +260,7 @@ Commit message:"""
                 commit_type = 'chore'
             
             # Generate message based on detected patterns
-            if 'huggingface' in git_diff.lower() or 'hf' in git_diff.lower():
-                return "feat: add Hugging Face integration for auto-commit messages"
-            elif 'openai' in git_diff.lower():
+            if 'openai' in git_diff.lower():
                 return "feat: add AI-powered commit message generation"
             elif 'requirements' in git_diff.lower():
                 return "chore: update dependencies"
@@ -883,7 +583,6 @@ Commit message:"""
             current_branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True, check=True)
             current_branch = current_branch_result.stdout.strip()
             subprocess.run(['git', 'push', 'origin', current_branch], check=True)
-            branch = current_branch
             branch = current_branch
             print(f"🚀 Pushed to {branch} branch")
             

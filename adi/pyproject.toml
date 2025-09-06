@@ -1,7 +1,7 @@
 [project]
 name = "github-cli-auth"
 version = "0.1.0"
-description = "Github Minimal Commit"
+description = "Github Minimal Commit Suggestor"
 readme = "README.md"
 requires-python = ">=3.8.1"
 dependencies = [
