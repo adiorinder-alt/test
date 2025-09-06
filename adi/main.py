@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from getpass import getpass
 from descope import DeliveryMethod
+
 try:
     from github import Github, GithubException
 except ImportError:
@@ -26,6 +27,13 @@ except ImportError:
     print("❌ OpenAI not installed. Run: pip install openai")
     sys.exit(1)
 
+try:
+    import requests
+except ImportError:
+    print("📦 Installing requests...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "requests"], check=True)
+    import requests
+
 class GitHubCLI:
     def __init__(self):
         self.config_dir = Path.home() / '.github-cli'
@@ -34,6 +42,7 @@ class GitHubCLI:
         self.descope_client = None
         self.openai_client = None
         self.config = {}
+        self.ollama_url = "http://localhost:11434"
         
         self.descope_project_id = os.getenv('DESCOPE_PROJECT_ID', 'P31M5kW4iiyEZQEnVzT8wSOjviwy')
         self.descope_management_key = os.getenv('DESCOPE_MANAGEMENT_KEY', 'P2DA3QqyF3N3BlmIqn1nr0LMFhrw:K31M7dAsZ3ZPw7Ux0YvZgGNmHtL79dyfXvR6GJncQwQ83tDgIvMzZv9W24z2WmrskEYejLT')
@@ -223,62 +232,227 @@ class GitHubCLI:
                 return True  # Changed to True to allow API attempts
     
     def try_huggingface_serverless(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
-        """Try Hugging Face Serverless Inference"""
+        """Try Hugging Face Serverless Inference with better error handling"""
         import requests
         
-        # Fast, lightweight models that usually work
+        if not hf_token:
+            print("⚠️ No HF token provided, trying without auth...")
+            return None  # Skip HF if no token
+        
+        # Working models for text generation
         models = [
             "microsoft/DialoGPT-small",
+            "gpt2",
             "distilgpt2"
         ]
         
         for model in models:
             try:
-                headers = {"Content-Type": "application/json"}
-                if hf_token:
-                    headers["Authorization"] = f"Bearer {hf_token}"
+                headers = {
+                    "Authorization": f"Bearer {hf_token}",
+                    "Content-Type": "application/json"
+                }
+                
+                # Simplified prompt for better results
+                simple_prompt = f"Commit message:\n{prompt[:500]}\n\nGenerate a git commit message:"
                 
                 print(f"🔄 Trying {model}...")
                 response = requests.post(
                     f"https://api-inference.huggingface.co/models/{model}",
                     headers=headers,
-                    json={"inputs": prompt},
-                    timeout=8  # Shorter timeout
+                    json={
+                        "inputs": simple_prompt,
+                        "parameters": {
+                            "max_new_tokens": 50,
+                            "temperature": 0.7,
+                            "do_sample": True,
+                            "return_full_text": False
+                        }
+                    },
+                    timeout=10
                 )
+                
+                print(f"📡 {model} response: {response.status_code}")
                 
                 if response.status_code == 200:
                     result = response.json()
+                    print(f"📄 Response data: {str(result)[:200]}")
+                    
                     if isinstance(result, list) and result:
                         generated = result[0].get("generated_text", "")
-                        commit_msg = self.extract_commit_message(generated, prompt)
+                        if generated:
+                            commit_msg = self.extract_commit_message(generated, simple_prompt)
+                            if commit_msg:
+                                print(f"✅ Success with {model}: {commit_msg}")
+                                return commit_msg
+                    elif isinstance(result, dict) and "generated_text" in result:
+                        generated = result["generated_text"]
+                        commit_msg = self.extract_commit_message(generated, simple_prompt)
                         if commit_msg:
-                            print(f"✅ Success with {model}!")
+                            print(f"✅ Success with {model}: {commit_msg}")
                             return commit_msg
+                
+                elif response.status_code == 503:
+                    print(f"⏳ {model} is loading, waiting 5 seconds...")
+                    import time
+                    time.sleep(5)
+                    continue
+                elif response.status_code == 401:
+                    print(f"🔐 {model} auth failed - check your HF token")
+                    continue
+                elif response.status_code == 429:
+                    print(f"⏱️ {model} rate limited")
+                    continue
+                else:
+                    print(f"❌ {model} failed: {response.status_code} - {response.text[:100]}")
+                    continue
                             
             except requests.exceptions.Timeout:
-                print(f"⏱️ {model} timeout")
+                print(f"⏱️ {model} timeout after 10s")
                 continue
             except Exception as e:
-                print(f"⚠️ {model} failed: {str(e)[:30]}")
+                print(f"⚠️ {model} error: {str(e)[:50]}")
                 continue
         
         return None
     
-    def try_alternative_apis(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
-        """Try alternative free AI APIs"""
-        import requests
-        
-        # Try a simple text completion API (mock implementation)
+    def check_ollama_running(self) -> bool:
+        """Check if Ollama is running"""
         try:
-            # This is a placeholder for other free APIs you could integrate
-            # For example: Together AI, Replicate, etc.
-            print("🔄 Trying alternative APIs...")
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+    
+    def get_available_models(self) -> list:
+        """Get list of available Ollama models"""
+        try:
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return [model['name'] for model in data.get('models', [])]
+        except:
+            pass
+        return []
+    
+    def generate_with_ollama(self, git_diff: str) -> Optional[str]:
+        """Generate commit message using local Ollama LLM"""
+        try:
+            if not self.check_ollama_running():
+                print("⚠️ Ollama is not running. Start with 'ollama serve'")
+                return None
             
-            # For now, return None to skip to next strategy
+            model = self.config.get('preferred_model', 'llama3.2:1b')
+            
+            # Check if model exists
+            available_models = self.get_available_models()
+            if not any(model.startswith(m.split(':')[0]) for m in available_models):
+                print(f"⚠️ Model {model} not found. Available models: {', '.join(available_models[:3])}")
+                if available_models:
+                    model = available_models[0]
+                    print(f"🔄 Using {model} instead")
+                else:
+                    print("❌ No models available. Run 'ollama pull llama3.2:1b' to install a model")
+                    return None
+            
+            # Create a focused prompt for commit messages
+            prompt = f"""Generate a concise git commit message for the following code changes. 
+Use conventional commit format (type: description). 
+Types: feat, fix, docs, style, refactor, test, chore.
+Keep it under 50 characters.
+
+Code changes:
+{git_diff[:1500]}
+
+Commit message:"""
+
+            print(f"🤖 Generating commit message with {model}...")
+            
+            response = requests.post(
+                f"{self.ollama_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,
+                        "top_p": 0.9,
+                        "num_predict": 50
+                    }
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                generated_text = result.get('response', '').strip()
+                
+                # Clean up the response
+                if generated_text:
+                    # Extract just the commit message
+                    lines = generated_text.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith('Commit message:'):
+                            # Remove quotes if present
+                            line = line.strip('"\'')
+                            # Ensure it follows conventional commit format
+                            if ':' in line and len(line) <= 72:
+                                return line
+                            elif len(line) <= 50:
+                                # Try to format it as conventional commit
+                                if not any(line.lower().startswith(t + ':') for t in ['feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore']):
+                                    return f"feat: {line.lower()}"
+                                return line
+                    
+                    # If no good line found, use the first part
+                    first_line = lines[0].strip().strip('"\'')
+                    if len(first_line) <= 50:
+                        return first_line
+            
             return None
             
-        except Exception:
+        except Exception as e:
+            print(f"❌ Ollama generation failed: {e}")
             return None
+    
+    def try_alternative_apis(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
+        """Try local LLM and other alternative APIs"""
+        # Try local Ollama LLM first
+        try:
+            print("🔄 Trying local LLM (Ollama)...")
+            result = self.generate_with_ollama(prompt)
+            if result:
+                return result
+        except Exception as e:
+            print(f"⚠️ Local LLM failed: {str(e)[:50]}")
+        
+        # Try OpenAI if available
+        try:
+            if self.openai_client or self.setup_openai_client():
+                print("🔄 Trying OpenAI API...")
+                
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are a git expert. Generate concise, conventional commit messages following the format 'type: description'. Types include feat, fix, docs, style, refactor, test, chore."},
+                        {"role": "user", "content": f"Generate a git commit message for these changes:\n{prompt[:800]}"}
+                    ],
+                    max_tokens=50,
+                    temperature=0.5
+                )
+                
+                if response.choices and response.choices[0].message:
+                    commit_msg = response.choices[0].message.content.strip()
+                    if commit_msg:
+                        commit_msg = commit_msg.strip('"\'')
+                        commit_msg = commit_msg[:72]
+                        print(f"✅ OpenAI generated: {commit_msg}")
+                        return commit_msg
+        except Exception as e:
+            print(f"⚠️ OpenAI failed: {str(e)[:50]}")
+        
+        return None
     
     def try_simple_text_generation(self, prompt: str, hf_token: Optional[str]) -> Optional[str]:
         """Try simple pattern-based generation as last resort before fallback"""
@@ -731,7 +905,6 @@ class GitHubCLI:
         except Exception as e:
             print(f"❌ An unexpected error occurred: {e}")
     def show_status(self):
-        
         print("\n📊 Status:")
         if 'user_email' in self.config:
             print(f"🔐 Descope: Authenticated as {self.config['user_email']}")
@@ -741,15 +914,27 @@ class GitHubCLI:
             print(f"🐙 GitHub: Connected as {self.config['github_username']}")
         else:
             print("🐙 GitHub: Not connected")
+        
+        # Ollama status
+        if self.check_ollama_running():
+            models = self.get_available_models()
+            preferred = self.config.get('preferred_model', 'None')
+            print(f"🤖 Ollama: Running ({len(models)} models available)")
+            print(f"🎯 Preferred model: {preferred}")
+        else:
+            print("🤖 Ollama: Not running (install from https://ollama.ai)")
+        
+        # Git status
         try:
             result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
             if result.returncode == 0:
                 if result.stdout.strip():
-                    print(f"📝 Uncommitted changes: {len(result.stdout.strip().split())} files")
+                    print(f"📝 Git: {len(result.stdout.strip().split())} uncommitted files")
                 else:
-                    print("✅ Working directory clean")
+                    print("✅ Git: Working directory clean")
         except subprocess.CalledProcessError:
             print("📁 Not in a git repository")
+        
         try:
             result = subprocess.run(['git', 'remote', 'get-url', 'origin'], capture_output=True, text=True)
             if result.returncode == 0:
