@@ -76,22 +76,17 @@ class GitHubCLI:
     
     
     def get_git_diff(self) -> Optional[str]:
-        """Get staged git changes for commit message generation"""
         try:
-            # Check if there are staged changes
             result = subprocess.run(['git', 'diff', '--staged', '--quiet'], capture_output=True)
             if result.returncode == 0:
-                # No staged changes, get all changes
                 result = subprocess.run(['git', 'diff'], capture_output=True, text=True)
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout
                 else:
-                    # If no unstaged changes either, compare with last commit
                     result = subprocess.run(['git', 'diff', 'HEAD~1'], capture_output=True, text=True)
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout
             else:
-                # Get staged changes
                 result = subprocess.run(['git', 'diff', '--staged'], capture_output=True, text=True)
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout
@@ -103,8 +98,6 @@ class GitHubCLI:
             return None
     
     def generate_commit_message(self, git_diff: str) -> Optional[str]:
-        """Generate commit message using local LLM (Ollama) with intelligent fallback"""
-        # Try local Ollama LLM first
         try:
             print("🔄 Trying local LLM (Ollama)...")
             result = self.generate_with_ollama(git_diff)
@@ -118,7 +111,6 @@ class GitHubCLI:
     
     
     def check_ollama_running(self) -> bool:
-        """Check if Ollama is running"""
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
             return response.status_code == 200
@@ -126,7 +118,6 @@ class GitHubCLI:
             return False
     
     def get_available_models(self) -> list:
-        """Get list of available Ollama models"""
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
             if response.status_code == 200:
@@ -137,7 +128,6 @@ class GitHubCLI:
         return []
     
     def generate_with_ollama(self, git_diff: str) -> Optional[str]:
-        """Generate commit message using local Ollama LLM"""
         try:
             if not self.check_ollama_running():
                 print("⚠️ Ollama is not running. Start with 'ollama serve'")
@@ -145,7 +135,6 @@ class GitHubCLI:
             
             model = self.config.get('preferred_model', 'llama3.2:1b')
             
-            # Check if model exists
             available_models = self.get_available_models()
             if not any(model.startswith(m.split(':')[0]) for m in available_models):
                 print(f"⚠️ Model {model} not found. Available models: {', '.join(available_models[:3])}")
@@ -156,79 +145,75 @@ class GitHubCLI:
                     print("❌ No models available. Run 'ollama pull llama3.2:1b' to install a model")
                     return None
             
-            # Create a focused prompt for commit messages
             prompt = f"""Generate a concise git commit message for the following code changes. 
-Use conventional commit format (type: description). 
-Types: feat, fix, docs, style, refactor, test, chore.
-Keep it under 50 characters.
+            Use conventional commit format (type: description). 
+            Types: feat, fix, docs, style, refactor, test, chore.
+            Keep it under 50 characters.
 
-Code changes:
-{git_diff[:1500]}
+            Code changes:
+            {git_diff[:1500]}
 
-Commit message:"""
+            Commit message:"""
 
             print(f"🤖 Generating commit message with {model}...")
-            
+                        
             response = requests.post(
-                f"{self.ollama_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.3,
-                        "top_p": 0.9,
-                        "num_predict": 50
-                    }
-                },
-                timeout=30
-            )
-            
+                            f"{self.ollama_url}/api/generate",
+                            json={
+                                "model": model,
+                                "prompt": prompt,
+                                "stream": False,
+                                "options": {
+                                    "temperature": 0.3,
+                                    "top_p": 0.9,
+                                    "num_predict": 50
+                                }
+                            },
+                            timeout=30
+                        )
+                        
+                        # --- START: REPLACEMENT BLOCK ---
             if response.status_code == 200:
-                result = response.json()
-                generated_text = result.get('response', '').strip()
-                
-                # Clean up the response
-                if generated_text:
-                    # Extract just the commit message
-                    lines = generated_text.split('\n')
-                    for line in lines:
-                        line = line.strip()
-                        if line and not line.startswith('Commit message:'):
-                            # Remove quotes if present
-                            line = line.strip('"\'')
-                            # Ensure it follows conventional commit format
-                            if ':' in line and len(line) <= 72:
-                                return line
-                            elif len(line) <= 50:
-                                # Try to format it as conventional commit
-                                if not any(line.lower().startswith(t + ':') for t in ['feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore']):
-                                    return f"feat: {line.lower()}"
-                                return line
-                    
-                    # If no good line found, use the first part
-                    first_line = lines[0].strip().strip('"\'')
-                    if len(first_line) <= 50:
-                        return first_line
-            
-            return None
-            
+                            result = response.json()
+                            generated_text = result.get('response', '').strip()
+                            
+                            # Define the valid conventional commit types
+                            valid_types = ['feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore']
+
+                            if generated_text:
+                                # Split the entire output into individual lines
+                                for line in generated_text.split('\n'):
+                                    # Clean up the line by removing whitespace and quotes
+                                    clean_line = line.strip().strip('"\'`')
+
+                                    # Check if the line contains a colon, a key part of the format
+                                    if ':' in clean_line:
+                                        # Extract the type (the part before the first colon)
+                                        commit_type = clean_line.split(':', 1)[0].lower()
+                                        
+                                        # If the type is valid and the message is a reasonable length, we found it!
+                                        if commit_type in valid_types and len(clean_line) <= 72:
+                                            return clean_line # Return the valid commit message immediately
+
+                            # If the loop finishes and nothing was found, print a warning
+                            print("⚠️ Could not find a valid conventional commit message in the LLM output.")
+                            return None
+                        # --- END: REPLACEMENT BLOCK ---
+                        
+            return None # Return None if status code was not 200
+                        
         except Exception as e:
-            print(f"❌ Ollama generation failed: {e}")
-            return None
+                        print(f"❌ Ollama generation failed: {e}")
+                        return None 
     
     
     def generate_fallback_message(self, git_diff: str) -> str:
-        """Generate a basic commit message using simple analysis (NO AI REQUIRED)"""
         try:
-            # Simple keyword-based analysis
             diff_lines = git_diff.lower().split('\n')
             
-            # Count changes
             added_lines = sum(1 for line in diff_lines if line.startswith('+') and not line.startswith('+++'))
             removed_lines = sum(1 for line in diff_lines if line.startswith('-') and not line.startswith('---'))
             
-            # Detect file types and changes
             change_types = set()
             
             for line in diff_lines:
@@ -245,7 +230,6 @@ Commit message:"""
                 elif 'requirements' in git_diff.lower() or 'package' in git_diff.lower():
                     change_types.add('chore')
             
-            # Determine primary change type
             if 'feat' in change_types:
                 commit_type = 'feat'
             elif 'fix' in change_types:
@@ -259,7 +243,6 @@ Commit message:"""
             else:
                 commit_type = 'chore'
             
-            # Generate message based on detected patterns
             if 'openai' in git_diff.lower():
                 return "feat: add AI-powered commit message generation"
             elif 'requirements' in git_diff.lower():
@@ -272,7 +255,7 @@ Commit message:"""
                 return f"{commit_type}: remove deprecated code"
             else:
                 return f"{commit_type}: update and improve codebase"
-                
+                        
         except Exception:
             return "chore: update codebase"
     
@@ -333,7 +316,7 @@ Commit message:"""
             else:
                 print("❌ No session token provided")
                 return False
-                
+                        
         except Exception as e:
             print(f"❌ Magic link authentication failed: {e}")
             return False
@@ -369,7 +352,7 @@ Commit message:"""
             else:
                 print("❌ Failed to get session token from response")
                 return False
-                
+                        
         except Exception as e:
             print(f"❌ OTP authentication failed: {e}")
             return False
@@ -439,7 +422,7 @@ Commit message:"""
             else:
                 print("⚠️  No GitHub token found in session data")
                 return None
-                
+                        
         except Exception as e:
             print(f"⚠️  Error extracting GitHub token from session: {e}")
             return None
@@ -620,7 +603,6 @@ Commit message:"""
         else:
             print("🐙 GitHub: Not connected")
         
-        # Ollama status
         if self.check_ollama_running():
             models = self.get_available_models()
             preferred = self.config.get('preferred_model', 'None')
@@ -629,7 +611,6 @@ Commit message:"""
         else:
             print("🤖 Ollama: Not running (install from https://ollama.ai)")
         
-        # Git status
         try:
             result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
             if result.returncode == 0:
@@ -711,7 +692,6 @@ Examples:
         
         message = args.message
         
-        # Handle auto commit message generation
         if args.auto:
             print("🤖 Generating commit message automatically...")
             git_diff = cli.get_git_diff()
@@ -726,7 +706,6 @@ Examples:
             
             print(f"🎆 Generated commit message: {generated_message}")
             
-            # Ask user to confirm the generated message
             confirm = input("\nUse this commit message? (y/n/edit): ").strip().lower()
             if confirm == 'n':
                 print("❌ Commit cancelled")
